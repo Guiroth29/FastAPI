@@ -201,9 +201,9 @@ echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━�
 echo ""
 
 # Suportar argumentos
-if [ "$@" == "--cov" ]; then
+if [ "$1" = "--cov" ]; then
     pytest tests/ -v --cov=app --cov-report=term-missing
-elif [ "$@" == "-v" ]; then
+elif [ "$1" = "-v" ]; then
     pytest tests/ -vv
 else
     pytest tests/test_books.py -v --tb=short
