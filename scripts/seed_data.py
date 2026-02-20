@@ -1,14 +1,17 @@
 """Seed script to populate database with initial data."""
 import logging
-from app.database import get_session
+from app.database import create_all_tables, get_session, init_db
 from app.models import Book
-from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
 
 def seed_books() -> None:
     """Seed the database with sample books."""
+    # Guarantees table availability even if migration state is stale.
+    init_db()
+    create_all_tables()
+
     db = get_session()
     
     # Check if books already exist

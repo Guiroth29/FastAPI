@@ -182,6 +182,14 @@ setup_postgres() {
   print_info "Aplicando migrações"
   alembic upgrade head >/dev/null
 
+  # Safety net: if alembic_version is marked but table is absent, recreate metadata.
+  API_ENVIRONMENT=production python - <<'PY'
+from app.database import create_all_tables, init_db
+
+init_db()
+create_all_tables()
+PY
+
   if [ "$RUN_SEED" -eq 1 ]; then
     print_info "Executando seed"
     python -m scripts.seed_data >/dev/null
