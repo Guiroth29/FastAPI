@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Books Control Deck</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="bg-shape bg-shape-one"></div>
+    <div class="bg-shape bg-shape-two"></div>
+
+    <main class="page">
+      <header class="hero stagger">
+        <p class="eyebrow">FASTAPI + POSTGRESQL</p>
+        <h1>Books Control Deck</h1>
+        <p class="subtitle">
+          Interface visual para explorar os endpoints de livros sem depender só do Swagger.
+        </p>
+      </header>
+
+      <section class="grid">
+        <article class="card stagger">
+          <div class="card-head">
+            <h2>Status da API</h2>
+            <button id="btn-health" class="btn btn-ghost" type="button">Atualizar</button>
+          </div>
+          <div class="health-grid">
+            <div class="metric">
+              <span>Aplicação</span>
+              <strong id="health-app">-</strong>
+            </div>
+            <div class="metric">
+              <span>Banco</span>
+              <strong id="health-db">-</strong>
+            </div>
+          </div>
+        </article>
+
+        <article class="card stagger">
+          <div class="card-head">
+            <h2>Novo livro</h2>
+          </div>
+          <form id="book-form" class="form">
+            <label>
+              Título
+              <input name="title" required minlength="1" maxlength="255" />
+            </label>
+            <label>
+              Autor
+              <input name="author" required minlength="1" maxlength="255" />
+            </label>
+            <label>
+              ISBN
+              <input name="isbn" required minlength="10" maxlength="20" />
+            </label>
+            <div class="form-row">
+              <label>
+                Páginas
+                <input name="pages" type="number" min="1" />
+              </label>
+              <label>
+                Ano
+                <input name="published_year" type="number" />
+              </label>
+            </div>
+            <label>
+              Descrição
+              <textarea name="description" rows="3"></textarea>
+            </label>
+            <button class="btn" type="submit">Criar livro</button>
+          </form>
+        </article>
+      </section>
+
+      <section class="card table-card stagger">
+        <div class="toolbar">
+          <h2>Catálogo</h2>
+          <div class="search-box">
+            <input id="search-input" placeholder="Buscar por título/autor" />
+            <button id="btn-search" class="btn btn-ghost" type="button">Buscar</button>
+            <button id="btn-clear" class="btn btn-ghost" type="button">Limpar</button>
+          </div>
+        </div>
+
+        <div id="table-wrap" class="table-wrap"></div>
+
+        <div class="pagination">
+          <button id="btn-prev" class="btn btn-ghost" type="button">Anterior</button>
+          <span id="page-label">Página -</span>
+          <button id="btn-next" class="btn btn-ghost" type="button">Próxima</button>
+        </div>
+      </section>
+
+      <p id="feedback" class="feedback" aria-live="polite"></p>
+    </main>
+
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

@@ -1,294 +1,236 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# ============================================================================
-# 📦 SETUP INICIAL - Prepara tudo para rodar
-# ============================================================================
-#
-# USO: ./setup.sh
-#
-# Este script:
-#   1. Verifica Python
-#   2. Verifica Docker
-#   3. Cria venv
-#   4. Instala dependências
-#   5. Inicia PostgreSQL
-#   6. Roda migrações
-#   7. Carrega dados de exemplo
-#
-# Depois: ./run.sh (para iniciar a API)
-#
-# ============================================================================
+ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT_DIR"
 
-set -e
-
-RED='\033[0;31m'
+BLUE='\033[0;34m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
+RED='\033[0;31m'
 NC='\033[0m'
 
-print_step() {
-    echo ""
-    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${BLUE}▶ $1${NC}"
-    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+VENV_DIR="${VENV_DIR:-.venv}"
+DB_MODE="auto"   # auto | postgres | sqlite
+RUN_SEED=1
+
+print_info() { echo -e "${BLUE}▶${NC} $1"; }
+print_ok() { echo -e "${GREEN}✅${NC} $1"; }
+print_warn() { echo -e "${YELLOW}⚠${NC}  $1"; }
+print_err() { echo -e "${RED}❌${NC} $1"; }
+
+usage() {
+  cat <<'USAGE'
+Uso: ./setup.sh [opções]
+
+Opções:
+  --postgres   Força setup com PostgreSQL (falha se Docker/Compose indisponível)
+  --sqlite     Força setup com SQLite local
+  --no-seed    Não executa seed de dados
+  -h, --help   Exibe esta ajuda
+USAGE
 }
 
-print_success() {
-    echo -e "${GREEN}✅ $1${NC}"
+parse_args() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --postgres) DB_MODE="postgres" ;;
+      --sqlite) DB_MODE="sqlite" ;;
+      --no-seed) RUN_SEED=0 ;;
+      -h|--help) usage; exit 0 ;;
+      *) print_err "Opção inválida: $1"; usage; exit 1 ;;
+    esac
+    shift
+  done
 }
 
-print_error() {
-    echo -e "${RED}❌ ERRO: $1${NC}"
+ensure_env_file() {
+  if [ ! -f .env ]; then
+    if [ -f .env.example ]; then
+      cp .env.example .env
+      print_warn "Arquivo .env não existia. Copiado de .env.example"
+    else
+      print_err "Nenhum .env ou .env.example encontrado"
+      exit 1
+    fi
+  fi
+}
+
+load_env_vars() {
+  set -a
+  # shellcheck disable=SC1091
+  . ./.env
+  set +a
+}
+
+ensure_venv() {
+  local sys_py_minor
+  local venv_py_minor
+  local req_hash
+  local cached_hash=""
+  local hash_file="$VENV_DIR/.requirements.hash"
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    print_err "Python3 não encontrado no PATH"
     exit 1
+  fi
+
+  sys_py_minor="$(python3 -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')"
+
+  if [ -x "$VENV_DIR/bin/python" ]; then
+    if ! "$VENV_DIR/bin/python" -c 'import pydantic_core._pydantic_core' >/dev/null 2>&1; then
+      print_warn "Ambiente virtual inválido detectado. Recriando $VENV_DIR"
+      rm -rf "$VENV_DIR"
+    else
+      venv_py_minor="$("$VENV_DIR/bin/python" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')"
+      if [ "$venv_py_minor" != "$sys_py_minor" ]; then
+        print_warn "Versão Python do venv ($venv_py_minor) difere do sistema ($sys_py_minor). Recriando"
+        rm -rf "$VENV_DIR"
+      fi
+    fi
+  fi
+
+  if [ ! -x "$VENV_DIR/bin/python" ]; then
+    print_info "Criando ambiente virtual em $VENV_DIR"
+    python3 -m venv "$VENV_DIR"
+  fi
+
+  # shellcheck disable=SC1090
+  source "$VENV_DIR/bin/activate"
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    req_hash="$(sha256sum requirements.txt | awk '{print $1}')"
+  else
+    req_hash="$(shasum -a 256 requirements.txt | awk '{print $1}')"
+  fi
+
+  if [ -f "$hash_file" ]; then
+    cached_hash="$(cat "$hash_file")"
+  fi
+
+  if [ "$req_hash" != "$cached_hash" ] || ! python -c 'import fastapi,sqlalchemy,alembic,pytest' >/dev/null 2>&1; then
+    print_info "Instalando dependências"
+    python -m pip install --quiet --upgrade pip setuptools wheel
+    python -m pip install --quiet -r requirements.txt
+    echo "$req_hash" > "$hash_file"
+  else
+    print_ok "Dependências já atualizadas"
+  fi
+
+  print_ok "Ambiente Python pronto"
 }
 
-# ============================================================================
-# FUNÇÃO: Detectar SO e instalar Docker automaticamente
-# ============================================================================
-install_docker_if_needed() {
-    if command -v docker &> /dev/null; then
-        echo -e "${GREEN}✅ Docker já está instalado${NC}"
-        return 0
-    fi
+detect_compose() {
+  if command -v docker-compose >/dev/null 2>&1; then
+    COMPOSE_CMD=(docker-compose)
+    return 0
+  fi
 
-    echo ""
-    echo -e "${YELLOW}⚠️  Docker não encontrado! Tentando instalar automaticamente...${NC}"
-    echo ""
+  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    COMPOSE_CMD=(docker compose)
+    return 0
+  fi
 
-    # Detectar SO
-    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-        # Tentar detectar a distribuição
-        if [ -f /etc/os-release ]; then
-            . /etc/os-release
-            OS=$(echo "$ID" | tr '[:upper:]' '[:lower:]')
-            # Se estiver em flatpak, tentar pegar informação real
-            if [[ "$OS" == "org.freedesktop.platform" ]] && [ -f /run/host/etc/os-release ]; then
-                . /run/host/etc/os-release
-                OS=$(echo "$ID" | tr '[:upper:]' '[:lower:]')
-            fi
-        else
-            OS="unknown"
-        fi
-
-        case "$OS" in
-            fedora|rhel|rocky|centos)
-                echo -e "${BLUE}📦 Detectado: Fedora/RHEL/CentOS${NC}"
-                echo "Executando: sudo dnf install -y docker docker-compose"
-                sudo dnf install -y docker docker-compose 2>/dev/null || echo "Instale via: sudo dnf install docker docker-compose"
-                sudo systemctl start docker 2>/dev/null || true
-                sudo systemctl enable docker 2>/dev/null || true
-                sudo usermod -aG docker $USER 2>/dev/null || true
-                ;;
-            debian|ubuntu|pop)
-                echo -e "${BLUE}📦 Detectado: Ubuntu/Debian${NC}"
-                echo "Executando: sudo apt-get update && sudo apt-get install -y docker.io docker-compose"
-                sudo apt-get update -qq 2>/dev/null
-                sudo apt-get install -y docker.io docker-compose 2>/dev/null || echo "Instale via: sudo apt-get install docker.io docker-compose"
-                sudo systemctl start docker 2>/dev/null || true
-                sudo systemctl enable docker 2>/dev/null || true
-                sudo usermod -aG docker $USER 2>/dev/null || true
-                ;;
-            opensuse*)
-                echo -e "${BLUE}📦 Detectado: openSUSE${NC}"
-                echo "Executando: sudo zypper install -y docker docker-compose"
-                sudo zypper install -y docker docker-compose 2>/dev/null || echo "Instale via: sudo zypper install docker docker-compose"
-                ;;
-            arch)
-                echo -e "${BLUE}📦 Detectado: Arch Linux${NC}"
-                echo "Executando: sudo pacman -S --noconfirm docker docker-compose"
-                sudo pacman -S --noconfirm docker docker-compose 2>/dev/null || echo "Instale via: sudo pacman -S docker docker-compose"
-                ;;
-            *)
-                echo -e "${YELLOW}⚠️  SO Linux não reconhecido: $OS${NC}"
-                echo "Detectamos: $OSTYPE"
-                echo ""
-                echo "Tente instalar Docker manualmente:"
-                echo "  https://docs.docker.com/get-docker/"
-                return 1
-                ;;
-        esac
-
-    elif [[ "$OSTYPE" == "darwin"* ]]; then
-        echo -e "${BLUE}📦 Detectado: macOS${NC}"
-        if ! command -v brew &> /dev/null; then
-            echo -e "${YELLOW}Instalando Homebrew primeiro...${NC}"
-            /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" 2>/dev/null || echo "Instale Homebrew de: https://brew.sh"
-        fi
-        echo "Executando: brew install docker docker-compose"
-        brew install docker docker-compose 2>/dev/null || echo "Instale via: brew install docker docker-compose"
-    else
-        echo -e "${RED}❌ SO não suportado para instalação automática: $OSTYPE${NC}"
-        echo "Instale Docker manualmente em: https://docs.docker.com/get-docker/"
-        return 1
-    fi
-
-    # Verificar se Docker foi instalado com sucesso
-    echo ""
-    echo -e "${YELLOW}Aguardando...${NC}"
-    sleep 2
-
-    # Tentar iniciar Docker se necessário
-    if command -v docker &> /dev/null; then
-        echo ""
-        echo -e "${GREEN}✅ Docker instalado com sucesso!${NC}"
-        DOCKER_VERSION=$(docker --version 2>/dev/null || echo "Docker instalado")
-        echo -e "${GREEN}   $DOCKER_VERSION${NC}"
-        return 0
-    else
-        echo ""
-        echo -e "${YELLOW}⚠️  Docker pode não estar disponível no PATH ainda${NC}"
-        echo "Tente: newgrp docker"
-        echo "Ou reinicie o terminal/VS Code"
-        return 1
-    fi
+  COMPOSE_CMD=()
+  return 1
 }
 
-# Header
-echo ""
-echo -e "${BLUE}╔════════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║               📦 SETUP INICIAL - COMEÇANDO... 📦              ║${NC}"
-echo -e "${BLUE}╚════════════════════════════════════════════════════════════════╝${NC}"
-echo ""
+wait_for_postgres() {
+  local retries=40
+  local db_user="${DB_USER:-books_user}"
+  local db_name="${DB_NAME:-books_db}"
 
-# ============================================================================
-# Verificar Python
-# ============================================================================
-print_step "1️⃣  Verificando Python..."
-
-if ! command -v python3 &> /dev/null; then
-    print_error "Python 3 não encontrado!"
-fi
-
-PYTHON_VERSION=$(python3 --version 2>&1)
-print_success "$PYTHON_VERSION"
-
-# ============================================================================
-# Verificar Docker
-# ============================================================================
-print_step "2️⃣  Verificando Docker..."
-
-# Função para detectar docker-compose correto (suporta novo "docker compose")
-get_docker_compose() {
-    if command -v docker-compose &> /dev/null; then
-        echo "docker-compose"
-    elif command -v docker &> /dev/null && docker compose version &> /dev/null 2>&1; then
-        echo "docker compose"
-    else
-        return 1
+  for _ in $(seq 1 "$retries"); do
+    if "${COMPOSE_CMD[@]}" exec -T postgres pg_isready -U "$db_user" -d "$db_name" >/dev/null 2>&1; then
+      return 0
     fi
+    sleep 1
+  done
+  return 1
 }
 
-# Instalar Docker se necessário
-install_docker_if_needed
+setup_postgres() {
+  if ! detect_compose; then
+    if [ "$DB_MODE" = "postgres" ]; then
+      print_err "Docker/Compose não disponível para modo --postgres"
+      exit 1
+    fi
 
-DOCKER_COMPOSE=$(get_docker_compose)
-if [ $? -ne 0 ]; then
-    print_error "❌ Docker Compose não encontrado!"
-    echo ""
-    echo "Opções:"
-    echo "  1️⃣  Atualize Docker para versão >= 20.10"
-    echo "  2️⃣  Ou instale docker-compose via pip: pip install docker-compose"
-    echo ""
-    exit 1
-fi
+    DB_MODE="sqlite"
+    print_warn "Docker/Compose indisponível. Fallback automático para SQLite"
+    setup_sqlite
+    return
+  fi
 
-print_success "Docker e Docker Compose ✓"
+  print_info "Subindo PostgreSQL via Docker Compose"
+  "${COMPOSE_CMD[@]}" up -d postgres >/dev/null
 
-# ============================================================================
-# Criar venv
-# ============================================================================
-print_step "3️⃣  Criando ambiente virtual..."
+  if ! wait_for_postgres; then
+    if [ "$DB_MODE" = "postgres" ]; then
+      print_err "PostgreSQL não ficou pronto a tempo"
+      exit 1
+    fi
 
-if [ ! -d "venv" ]; then
-    python3 -m venv venv
-    print_success "Venv criado"
-else
-    print_success "Venv já existe"
-fi
+    DB_MODE="sqlite"
+    print_warn "PostgreSQL indisponível. Fallback automático para SQLite"
+    setup_sqlite
+    return
+  fi
 
-source venv/bin/activate
+  export USE_SQLITE_FOR_TESTS=0
 
-# ============================================================================
-# Instalar dependências
-# ============================================================================
-print_step "4️⃣  Instalando dependências..."
+  print_info "Aplicando migrações"
+  alembic upgrade head >/dev/null
 
-# Fazer upgrade do pip
-python -m pip install --quiet --upgrade pip setuptools wheel
+  if [ "$RUN_SEED" -eq 1 ]; then
+    print_info "Executando seed"
+    python -m scripts.seed_data >/dev/null
+  fi
 
-# Instalar todas as dependências
-python -m pip install -r requirements.txt --quiet 2>/dev/null
+  print_ok "PostgreSQL configurado"
+}
 
-# Se falhar, tentar modo binário (para psycopg2)
-if ! python -m pip install -r requirements.txt --quiet 2>/dev/null; then
-    echo "Tentando instalação com binários pré-compilados..."
-    python -m pip install --only-binary :all: fastapi sqlalchemy psycopg2-binary pydantic-settings python-dotenv alembic pytest --quiet 2>/dev/null
-fi
+setup_sqlite() {
+  export USE_SQLITE_FOR_TESTS=1
 
-# Verificar se pytest está disponível
-if python -c "import pytest" 2>/dev/null; then
-    PYTEST_STATUS="✓"
-else
-    python -m pip install pytest pytest-asyncio httpx --quiet 2>/dev/null
-    PYTEST_STATUS="✓ (instalado neste momento)"
-fi
+  print_info "Configurando SQLite local"
+  API_ENVIRONMENT=production python - <<'PY'
+from app.database import create_all_tables, init_db
+from scripts.seed_data import seed_books
 
-print_success "Dependências instaladas ($PYTEST_STATUS)"
+init_db()
+create_all_tables()
+seed_books()
+PY
 
-# ============================================================================
-# Iniciar PostgreSQL
-# ============================================================================
-print_step "5️⃣  Iniciando PostgreSQL com Docker..."
+  print_ok "SQLite configurado"
+}
 
-$DOCKER_COMPOSE down -v 2>/dev/null || true
-$DOCKER_COMPOSE up -d postgres
+print_summary() {
+  echo
+  echo -e "${GREEN}Setup concluído.${NC}"
+  if [ "$DB_MODE" = "sqlite" ]; then
+    echo "Banco ativo: SQLite (USE_SQLITE_FOR_TESTS=1)"
+    echo "Execute a API com: USE_SQLITE_FOR_TESTS=1 .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+  else
+    echo "Banco ativo: PostgreSQL em Docker"
+    echo "Execute a API com: .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+  fi
+}
 
-echo "Aguardando PostgreSQL iniciar..."
-sleep 2
+main() {
+  parse_args "$@"
+  ensure_env_file
+  load_env_vars
+  ensure_venv
 
-until $DOCKER_COMPOSE exec -T postgres pg_isready -U books_user &>/dev/null; do
-    echo "  ⏳ Ainda aguardando..."
-    sleep 2
-done
+  case "$DB_MODE" in
+    sqlite) setup_sqlite ;;
+    postgres|auto) setup_postgres ;;
+    *) print_err "Modo de banco inválido: $DB_MODE"; exit 1 ;;
+  esac
 
-print_success "PostgreSQL rodando"
+  print_summary
+}
 
-# ============================================================================
-# Rodar migrações
-# ============================================================================
-print_step "6️⃣  Aplicando migrações do banco..."
-
-alembic upgrade head
-print_success "Banco estruturado"
-
-# ============================================================================
-# Seed data
-# ============================================================================
-print_step "7️⃣  Carregando dados de exemplo..."
-
-python -m scripts.seed_data
-print_success "6 livros carregados"
-
-# ============================================================================
-# Tudo pronto!
-# ============================================================================
-echo ""
-echo -e "${GREEN}╔════════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║                  ✨ SETUP CONCLUÍDO! ✨                       ║${NC}"
-echo -e "${GREEN}╠════════════════════════════════════════════════════════════════╣${NC}"
-echo -e "${GREEN}║                                                               ║${NC}"
-echo -e "${GREEN}║  🚀 Próximo passo: ./run.sh                                   ║${NC}"
-echo -e "${GREEN}║                                                               ║${NC}"
-echo -e "${GREEN}║  Isso vai iniciar a API em:                                  ║${NC}"
-echo -e "${GREEN}║  http://localhost:8000/docs                                  ║${NC}"
-echo -e "${GREEN}║                                                               ║${NC}"
-echo -e "${GREEN}╚════════════════════════════════════════════════════════════════╝${NC}"
-echo ""
-
-# Oferecer rodar agora
-read -p "Quer rodar a API agora? (s/n) " -n 1 -r
-echo ""
-if [[ $REPLY =~ ^[Ss]$ ]]; then
-    ./run.sh
-fi
+main "$@"
