@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: books_postgres
+    environment:
+      POSTGRES_USER: books_user
+      POSTGRES_PASSWORD: books_password
+      POSTGRES_DB: books_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U books_user -d books_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - books_network
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: books_api
+    environment:
+      PYTHONPATH: /app
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: books_user
+      DB_PASSWORD: books_password
+      DB_NAME: books_db
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      API_ENVIRONMENT: production
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - books_network
+    command: sh -c "alembic upgrade head && python -m scripts.seed_data && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+volumes:
+  postgres_data:
+
+networks:
+  books_network:
+    driver: bridge
